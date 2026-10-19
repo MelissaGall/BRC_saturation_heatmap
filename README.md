@@ -7,7 +7,7 @@ Read counting and heatmap for BRC repeats saturation variants.
 | Script | What it does |
 |---|---|
 | `scripts/count_saturation_variants.py` | Counts reads for every codon substitution at the target positions for BRC2 |
-| `scripts/count_brc_sequences.py` | Counts reads matching each full BRC sequence |
+| `scripts/count_brc_sequences.py` | Counts reads matching each full BRC sequence (BRC1-8) |
 | `scripts/BRC2_heatmap.R` | Plots log2(ratio) heatmap per amino acid and treatment |
 
 Reference sequences are in `refs/`.

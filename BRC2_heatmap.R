@@ -1,128 +1,89 @@
-# Libraries
-library(openxlsx)
-library(ggplot2)
-library(dplyr)
-library(data.table)
-library(ComplexHeatmap)
-library(tidyr)
-library(circlize)
+# Heatmap of mean log2(ratio) per amino acid substitution and treatment
+# Usage: Rscript scripts/BRC2_heatmap.R [counts_BRC2.xlsx] [BRC2_heatmap.pdf]
 
-# Version
-vers <- 2
+suppressPackageStartupMessages({
+  library(openxlsx)
+  library(dplyr)
+  library(tidyr)
+  library(ComplexHeatmap)
+  library(circlize)
+})
 
-# Load data
-data <- read.xlsx("counts_BRC2.xlsx")
+args    <- commandArgs(trailingOnly = TRUE)
+infile  <- if (length(args) >= 1) args[1] else "counts_BRC2.xlsx"
+outfile <- if (length(args) >= 2) args[2] else "BRC2_heatmap.pdf"
 
-# Add AA infos
-data <- data %>%
-  mutate(Consequence = case_when(AA == "*" ~ "Term",
-                                 AA == AAref ~ "Silent",
-                                 TRUE ~ "Missense")) %>%
-  mutate(Type = case_when(AA %in% c("H", "K", "R") ~ "Positive",
-                          AA %in% c("D", "E") ~ "Negative",
-                          AA %in% c("A", "V", "C", "L", "I", "M") ~ "Non-polar",
-                          AA %in% c("T", "N", "Q", "S") ~ "Polar neutral",
-                          AA %in% c("F", "W", "Y") ~ "Aromatic",
-                          AA %in% c("G", "P") ~ "Unique",
-                          AA == "*" ~ "Term",
-                          TRUE ~ "ERROR"))
+treatments <- c("DMSO", "CIS", "OLA")
+ref_aa     <- c("F", "Y", "S", "A")
+aa_types   <- list("Positive"      = c("H", "K", "R"),
+                   "Negative"      = c("D", "E"),
+                   "Polar neutral" = c("T", "N", "Q", "S"),
+                   "Non-polar"     = c("A", "V", "C", "L", "I", "M"),
+                   "Aromatic"      = c("F", "W", "Y"),
+                   "Unique"        = c("G", "P"))
 
-# Prepare data 
-heatmap_data <- data.frame("AA" = data$AA,
-                           "AAref" = data$AAref,
-                           "Consequence" = data$Consequence,
-                           "Type" = data$Type,
-                           "DMSO" = rowMeans(data[, c("DMSO/D3.RP1.ratio",
-                                                      "DMSO/D3.RP2.ratio",
-                                                      "DMSO/D3.RP3.ratio")]),
-                           "CIS" = rowMeans(data[, c("CIS/D3.RP1.ratio",
-                                                     "CIS/D3.RP2.ratio",
-                                                     "CIS/D3.RP3.ratio")]),
-                           "OLA" = rowMeans(data[, c("OLA/D3.RP1.ratio",
-                                                     "OLA/D3.RP2.ratio",
-                                                     "OLA/D3.RP3.ratio")]))
+aa_type <- function(aa) {
+  out <- rep("ERROR", length(aa))
+  for (t in names(aa_types)) out[aa %in% aa_types[[t]]] <- t
+  out[aa == "*"] <- "Term"
+  out
+}
 
-heatmap_data$AAref <- factor(heatmap_data$AAref, levels = c("F", "Y", "S", "A"))
+# --- Data ---
+data <- read.xlsx(infile)
 
-# Get mean per compound
-heatmap_data <- heatmap_data %>%
+# Mean of replicates per treatment, then mean per AA x AAref
+for (t in treatments) {
+  data[[t]] <- rowMeans(data[, paste0(t, "/D3.RP", 1:3, ".ratio")])
+}
+
+hm <- data %>%
+  mutate(Type = aa_type(AA), AAref = factor(AAref, levels = ref_aa)) %>%
   group_by(AA, AAref, Type) %>%
-  summarize(DMSO = mean(DMSO, na.rm = TRUE),
-            CIS = mean(CIS, na.rm = TRUE),
-            OLA = mean(OLA, na.rm = TRUE))
+  summarise(across(all_of(treatments), ~ mean(.x, na.rm = TRUE)), .groups = "drop") %>%
+  pivot_wider(names_from = AAref, values_from = all_of(treatments))
 
-heatmap_data <- pivot_wider(heatmap_data, names_from = AAref, values_from = c(DMSO, CIS, OLA))
+# --- Matrix ---
+cols <- paste(rep(treatments, each = length(ref_aa)), ref_aa, sep = "_")
+mat  <- log2(as.matrix(hm[, cols]))
+rownames(mat) <- hm$AA
 
-# Convert as matrix
-mat <- as.matrix(heatmap_data[, -c(1,2)])
-mat <- log2(mat)
-rownames(mat) <- c(heatmap_data$AA)
-mat <- rbind(mat, Silent = NA)
+# "Silent" row = WT codon (AA == AAref) for each column
+silent <- sapply(cols, function(cl) mat[sub(".*_", "", cl), cl])
+mat <- rbind(mat, Silent = silent)
+mat[is.infinite(mat)] <- NA
 
-mat["Silent",] <- c(mat["F", "DMSO_F"],
-                    mat["Y", "DMSO_Y"],
-                    mat["S", "DMSO_S"],
-                    mat["A", "DMSO_A"],
-                    mat["F", "CIS_F"],
-                    mat["Y", "CIS_Y"],
-                    mat["S", "CIS_S"],
-                    mat["A", "CIS_A"],  
-                    mat["F", "OLA_F"],
-                    mat["Y", "OLA_Y"],
-                    mat["S", "OLA_S"],
-                    mat["A", "OLA_A"])
+# --- Annotations ---
+row_type <- c(hm$Type, "")
+row_type[rownames(mat) == "*"] <- " "
+row_type <- factor(row_type, levels = c(names(aa_types), "", " "))
+rownames(mat)[rownames(mat) == "*"] <- "Stop"
 
-mat[mat == -Inf] <- NA
+col_split <- factor(rep(treatments, each = length(ref_aa)), levels = treatments)
+colnames(mat) <- rep(ref_aa, length(treatments))
 
-# Color scale
-col_fun <- colorRamp2(
-  c(min(mat, na.rm = T), 0, max(mat, na.rm = T)), 
-  c("#DC3220", "#ebe9ef", "#005AB5"),
-)
+col_fun <- colorRamp2(c(min(mat, na.rm = TRUE), 0, max(mat, na.rm = TRUE)),
+                      c("#DC3220", "#ebe9ef", "#005AB5"))
 
-# Row annotation
-annot <- data.frame("AA" = rownames(mat))
-annot <- merge(annot, heatmap_data[, c("AA", "Type")], all.x = T, sort = F)
-annot$Type[annot$AA == "Silent"] <- ""
-annot$Type[annot$AA == "*"] <- " "
-annot$AA[annot$AA == "*"] <- "Stop"
+# --- Plot ---
+ht <- Heatmap(mat,
+              name = "log2(ratio)",
+              col = col_fun, na_col = "grey",
+              cluster_rows = FALSE, cluster_columns = FALSE,
+              row_split = row_type, column_split = col_split,
+              row_names_side = "left", column_names_rot = 0,
+              width = unit(ncol(mat) * 0.9, "cm"),
+              height = unit(nrow(mat) * 0.9, "cm"),
+              # white dot = WT residue
+              cell_fun = function(j, i, x, y, w, h, fill) {
+                if (rownames(mat)[i] == colnames(mat)[j]) {
+                  grid.points(x, y, pch = 21, size = unit(6, "mm"),
+                              gp = gpar(fill = "white", col = "black", lwd = 0.5))
+                }
+              })
 
-annot$Type <- factor(annot$Type, levels = c("Positive", "Negative", "Polar neutral", "Non-polar", "Aromatic", "", " "))
+pdf(outfile, height = nrow(mat) * 0.4)
+draw(ht)
+invisible(dev.off())
+message("Written: ", outfile)
 
-colnames(mat) <- c("F", "Y", "S", "A", "F", "Y", "S", "A", "F", "Y", "S", "A")
-
-# Column annotation
-col_split <- c(rep("DMSO", 4), rep("CIS", 4), rep("OLA", 4))
-col_split <- factor(col_split, levels = unique(col_split))
-
-# Dot matrix
-dot_matrix <- outer(
-  rownames(mat),
-  colnames(mat),
-  FUN = "=="
-)
-
-# Save
-pdf(paste0("BRC2_heatmap_", vers, ".pdf"), height = nrow(mat) * 0.4)
-Heatmap(mat,
-        col = col_fun, 
-        na_col = "grey", 
-        cluster_columns = F, 
-        split = annot$Type, 
-        column_split = col_split,
-        name = "log2(ratio)",
-        width = unit(ncol(mat) * 0.9, "cm"),
-        height = unit(nrow(mat) * 0.9, "cm"),
-        row_names_side = "left",
-        column_names_rot = 0, cluster_rows = F,
-        cell_fun = function(j, i, x, y, w, h, fill) {
-          if (rownames(mat)[i] == colnames(mat)[j]) {
-            grid.points(
-              x, y,
-              pch = 21,
-              gp = gpar(fill = "white", col = "black", lwd = 0.5),
-              size = unit(6, "mm")
-            )
-          }  
-        })
-dev.off()

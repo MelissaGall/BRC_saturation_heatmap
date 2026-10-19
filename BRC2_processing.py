@@ -1,51 +1,69 @@
-from Bio.Seq import Seq
+#!/usr/bin/env python3
+"""Count reads carrying each codon substitution at selected positions of the BRC2 reference."""
+
+import argparse
+import gzip
 from collections import defaultdict
+from itertools import product
+
 import ahocorasick
+from Bio import SeqIO
+from Bio.Seq import Seq
 
-# Reference sequence
-REF = ("ATGTTCTTGCAGAGGAGAACAAAAATAGTGTAAAGCAGCATATAAAAATGACTCTAGGTCAAGATTTAAAATCGGACATCTCCTTGAATATAGATAAAATACCAGAAAAAAATAATGATTACATGAACAAATGGGCAGGACTCTTAGGTCCAATTTCAAATGAAGTGGGATTTAGGGGCTTTTATTCTGCTCATGGCACAAAACTGAATGTTTCTACTGAAGCTCTGCAAAAAGCTGTGAAACTGTTTAGTGATATTGAGAATATCAGAACTGAGCATAGTCTTCACTATTCACCTACGTCTAGACAAAATGTATCAAAAATACTTCCTCGTGTTGATAAGAGAAACCCAGAGCACTGTGTAAACT")
 
-regions = [179, 182, 185, 188]  # 0-based
-FASTQ = "XBRC2Sat-DMSORP2.merged.fastq"
-OUTFILE = "variant_counts_BRSat_DMSO_RP2.tsv"
+def read_ref(path):
+    return str(next(SeqIO.parse(path, "fasta")).seq).upper()
 
-# Create all possible 3-mer mutations for given regions
-mutants = {}
-for pos in regions:
-    wt = REF[pos:pos+3]
-    for b1 in "ACGT":
-        for b2 in "ACGT":
-            for b3 in "ACGT":
-                alt = b1 + b2 + b3
-                if alt == wt:
-                    continue
-                mut_seq = REF[:pos] + alt + REF[pos+3:]
-                rc_seq = str(Seq(mut_seq).reverse_complement())
-                label = f"{pos+1}-X-{alt}"  # 1-based
-                mutants[label] = (mut_seq, rc_seq)
 
-# Build Aho-Corasick automaton for fast multiple pattern matching
-automaton = ahocorasick.Automaton()
-for label, (mut_seq, rc_seq) in mutants.items():
-    automaton.add_word(mut_seq, (label, 'F'))
-    automaton.add_word(rc_seq, (label, 'R'))
-automaton.make_automaton()
+def build_mutants(ref, positions):
+    """All 63 non-WT codons at each 0-based position -> {label: full mutant sequence}."""
+    mutants = {}
+    for pos in positions:
+        wt = ref[pos:pos + 3]
+        for alt in map("".join, product("ACGT", repeat=3)):
+            if alt != wt:
+                mutants[f"{pos + 1}-X-{alt}"] = ref[:pos] + alt + ref[pos + 3:]
+    return mutants
 
-# Initialize counts
-counts = defaultdict(int)
 
-# Process FASTQ file
-with open(FASTQ) as f:
-    for i, line in enumerate(f):
-        if i % 4 == 1:
-            seq = line.strip()
-            for end_idx, (label, _) in automaton.iter(seq):
-                counts[label] += 1
+def build_automaton(mutants):
+    auto = ahocorasick.Automaton()
+    for label, seq in mutants.items():
+        auto.add_word(seq, label)
+        auto.add_word(str(Seq(seq).reverse_complement()), label)
+    auto.make_automaton()
+    return auto
 
-# Write output
-with open(OUTFILE, "w") as out:
-    out.write("Mutation\tCount\n")
-    for label in sorted(mutants):
-        out.write(f"{label}\t{counts[label]}\n")
 
-print(f"Done. Output written to {OUTFILE}")
+def count(fastq, auto):
+    counts = defaultdict(int)
+    opener = gzip.open if fastq.endswith(".gz") else open
+    with opener(fastq, "rt") as f:
+        for i, line in enumerate(f):
+            if i % 4 == 1:
+                for _, label in auto.iter(line.strip()):
+                    counts[label] += 1
+    return counts
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("fastq", help="merged FASTQ (.fastq or .fastq.gz)")
+    p.add_argument("-o", "--out", required=True, help="output TSV")
+    p.add_argument("-r", "--ref", default="refs/BRC2_ref.fa")
+    p.add_argument("-p", "--positions", type=int, nargs="+", default=[179, 182, 185, 188],
+                   help="0-based codon start positions")
+    a = p.parse_args()
+
+    mutants = build_mutants(read_ref(a.ref), a.positions)
+    counts = count(a.fastq, build_automaton(mutants))
+
+    with open(a.out, "w") as out:
+        out.write("Mutation\tCount\n")
+        for label in sorted(mutants):
+            out.write(f"{label}\t{counts[label]}\n")
+    print(f"Written: {a.out}")
+
+
+if __name__ == "__main__":
+    main()

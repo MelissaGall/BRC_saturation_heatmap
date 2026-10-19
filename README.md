@@ -1,6 +1,6 @@
-# BRC2 saturation editing
+# BRC repeats saturation editing
 
-Read counting and heatmap for BRC2 saturation variants.
+Read counting and heatmap for BRC repeats saturation variants.
 
 ## Scripts
 
